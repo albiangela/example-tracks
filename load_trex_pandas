@@ -1,0 +1,185 @@
+### Function to load the npz files from TRex - gets this from a list of files in a folder
+def load_trex_tracks(tracks):
+    """
+    Function to load npz files from TRex without predefining specific keys.
+
+    Parameters:
+    tracks (list): A list of file paths pointing to .npz trajectory files.
+
+    Returns:
+    list: A list of dictionaries, each containing key-value pairs where:
+          - Keys are the names of the stored arrays.
+          - Values are the corresponding 1D arrays from the .npz file.
+
+    Only keys with a single-dimensional array (shape length of 1) are loaded.
+    """
+    mapped_data = []  # List to store the extracted data from each .npz file
+    for data_file in tracks:
+        with np.load(data_file) as data:  # Load the .npz file
+            m = {}  # Dictionary to store selected key-value pairs
+            for k in data.files:  # Iterate through all keys in the .npz file
+                if len(data[k].shape) == 1:  # Select only keys with 1D arrays
+                    m[k] = data[k]  # Store the key-value pair
+            mapped_data.append(m)  # Append the extracted data to the list
+    return mapped_data  # Return the list of dictionaries
+
+
+def from_trex_style_df(df: pd.DataFrame, fps: float = 30):
+    """
+    Convert a pandas DataFrame created on with the TRex output .npz files into a xarray Dataset of pose data.
+
+    This function takes a DataFrame containing tracking data in TRex-style format and
+    constructs an xarray Dataset suitable for further analysis or visualization in SLEAP.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        A pandas DataFrame with columns including:
+        - "frame": Frame number (int).
+        - "ID": Animal or individual ID (int).
+        - "X#wcentroid": X-coordinate for the centroid (float).
+        - "Y#wcentroid": Y-coordinate for the centroid (float).
+        The DataFrame is expected to have one row per frame-ID combination with the
+        relevant centroid coordinates.
+    fps : float, optional
+        The frames per second at which the video was recorded. This will be attached to
+        the xarray Dataset as metadata. Default is 30.
+
+    Returns
+    -------
+    ds : xarray.Dataset
+        An xarray Dataset containing:
+        - position_array with shape (n_frames, 2, 1, n_individuals).
+          The array stores centroid positions for each frame and individual.
+        - confidence_array with shape (n_frames, 1, n_individuals).
+          The array stores confidence scores, which are all set to 1 here.
+        - Coordinates for frames, individuals, and keypoints.
+        - The `fps` stored as metadata.
+
+    Notes
+    -----
+    - In this representation, there is only one keypoint ("centroid") for each individual.
+    - The dimension order is (frames, xy, keypoints, individuals).
+    - The function also returns a confidence array of ones, which can be replaced with real
+      confidence values if available.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> from my_module import from_trex_style_df
+    >>>
+    >>> data = {
+    ...     "frame": [0, 0, 1, 1],
+    ...     "ID": [10, 11, 10, 11],
+    ...     "X#wcentroid": [100.0, 150.5, 101.0, 151.5],
+    ...     "Y#wcentroid": [200.0, 250.5, 201.0, 251.5],
+    ... }
+    >>> df = pd.DataFrame(data)
+    >>> ds = from_trex_style_df(df, fps=60)
+    >>> ds
+    <xarray.Dataset>
+    Dimensions:           (frames: 2, nodes: 1, individuals: 2, xy: 2)
+    Coordinates:
+      * frames            (frames) int64 0 1
+      * nodes             (nodes) <U8 'centroid'
+      * individuals       (individuals) <U5 'ID_10' 'ID_11'
+      * xy                (xy) <U1 'x' 'y'
+    Data variables:
+        centroid_position (frames, xy, nodes, individuals) float64 ...
+        centroid_conf     (frames, nodes, individuals) float64 ...
+    Attributes:
+        fps:              60
+
+    """
+    # Ensure the DataFrame is sorted by frame and ID
+    df = df.sort_values(by=["frame", "ID"])
+
+    # Get the unique frames and IDs present in the DataFrame
+    unique_frames = df["frame"].unique()
+    unique_ids = df["ID"].unique()
+
+    # Create a mapping from frame number to index in the output arrays
+    frame_to_idx = {frame: i for i, frame in enumerate(unique_frames)}
+    # Create a mapping from individual ID to index in the output arrays
+    id_to_idx = {id_: i for i, id_ in enumerate(unique_ids)}
+
+    # Initialize the position array with NaNs:
+    # Shape => (n_frames, 2, 1, n_individuals)
+    position_array = np.full(
+        (len(unique_frames), 2, 1, len(unique_ids)),
+        np.nan
+    )
+
+    # Populate the position array with the centroid values
+    for _, row in df.iterrows():
+        frame_idx = frame_to_idx[row["frame"]]
+        individual_idx = id_to_idx[row["ID"]]
+        position_array[frame_idx, 0, 0, individual_idx] = row["X#wcentroid"]
+        position_array[frame_idx, 1, 0, individual_idx] = row["Y#wcentroid"]
+
+    # Create an array of confidence values, all set to 1
+    confidence_array = np.ones((len(unique_frames), 1, len(unique_ids)))
+
+    # Define individual and keypoint names for the dataset
+    individual_names = [f"ID_{id_}" for id_ in unique_ids]
+    keypoint_names = ["centroid"]
+
+    # Load the data into an xarray Dataset via the sleap_io utility
+    ds = load_poses.from_numpy(
+        position_array=position_array,
+        confidence_array=confidence_array,
+        individual_names=individual_names,
+        keypoint_names=keypoint_names,
+        fps=fps,
+    )
+
+    return ds
+
+
+### Get the list of files
+files = np.sort(glob.glob("example-tracks/hexbugs/data/*.npz"))
+print(files)
+
+
+# Load the raw tracking data from the files using the previously defined function.
+# tracks_data: list of dictionaries.
+# Each dictionary represents data for one track and contains key-value pairs.
+#   Keys: strings (e.g., 'num_pixels', 'SPEED#pcentroid')
+#   Values: 1D numpy arrays with dtype=float32 (e.g., array([8851., 8473., ...], dtype=float32))
+#        or dtype=float64
+trex_data = load_trex_tracks(files)
+
+
+# ### Load the files and create a list of dictionaries
+# mapped_data = []  # List to store the extracted data from each .npz file
+# for data_file in files:
+#   with np.load(data_file) as data:  # Load the .npz file
+#       m = {}  # Dictionary to store selected key-value pairs
+#       for k in data.files:  # Iterate through all keys in the .npz file
+#           if len(data[k].shape) == 1:  # Select only keys with 1D arrays
+#               m[k] = data[k]  # Store the key-value pair
+#       mapped_data.append(m)  # Append the extracted data to the list
+
+
+
+# Define the number of individual bugs being tracked.
+nbugs = 5
+# Iterate through each hexbugs's data (0 to 4).
+for i in range(nbugs):
+    # Create a temporary Pandas DataFrame for the current bug's data.
+    tmp_df = pd.DataFrame(trex_data[i])
+    # Add an 'ID' column to the temporary DataFrame, assigning the bug's index as its ID.
+    tmp_df['ID'] = i
+    # For the first bug (i = 0), initialize the main DataFrame 'df'.
+    if i == 0:
+        df = tmp_df
+    # For subsequent bugs, concatenate the temporary DataFrame to the main DataFrame.
+    else:
+        df = pd.concat([df, tmp_df])
+
+# Reset the index of the main DataFrame to be a continuous range.
+df.reset_index(inplace=True, drop=True)
+
+
+### Function to transform a pandas DataFrame to an xarray dataset
+ds = from_trex_style_df(df,fps=framerate)
